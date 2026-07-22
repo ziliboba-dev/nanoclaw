@@ -13,8 +13,19 @@ import { upsertUser } from '../modules/permissions/db/users.js';
 import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { sanitizeTelegramLegacyMarkdown } from './telegram-markdown-sanitize.js';
 import { registerChannelAdapter } from './channel-registry.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
+
+/**
+ * Dedicated bot identity, non-threaded platform (supportsThreads:false), so
+ * group engagement can never be sticky-per-thread — 'mention' keeps a group
+ * wiring from staying engaged forever in the single shared session.
+ */
+const TELEGRAM_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'request_approval' },
+  group: { engageMode: 'mention', threads: false, unknownSenderPolicy: 'request_approval' },
+  mentions: 'platform',
+};
 
 /**
  * Retry a one-shot operation that can fail on transient network errors at
@@ -80,6 +91,12 @@ function readInboundFields(message: InboundMessage): InboundFields {
 }
 
 /**
+ * Build an onInbound interceptor that consumes pairing codes before they
+ * reach the router. On match: records the chat + its paired user, promotes
+ * the user to owner if the instance has no owner yet, and short-circuits.
+ * On miss: forwards to the host.
+ */
+/**
  * Send a one-shot confirmation back to the paired chat. Best-effort — failures
  * are logged but never propagated, so a Telegram outage can't undo a successful
  * pairing or trigger the interceptor's fail-open path.
@@ -104,12 +121,6 @@ async function sendPairingConfirmation(token: string, platformId: string): Promi
   }
 }
 
-/**
- * Build an onInbound interceptor that consumes pairing codes before they
- * reach the router. On match: records the chat + its paired user, promotes
- * the user to owner if the instance has no owner yet, and short-circuits.
- * On miss: forwards to the host.
- */
 function createPairingInterceptor(
   botUsernamePromise: Promise<string | null>,
   hostOnInbound: ChannelSetup['onInbound'],
@@ -154,7 +165,10 @@ function createPairingInterceptor(
           platform_id: platformId,
           name: consumed.consumed!.name,
           is_group: consumed.consumed!.isGroup ? 1 : 0,
-          unknown_sender_policy: 'strict',
+          // Same context-appropriate default as router auto-create, so a
+          // paired chat behaves like any other telegram messaging group.
+          unknown_sender_policy: (consumed.consumed!.isGroup ? TELEGRAM_DEFAULTS.group : TELEGRAM_DEFAULTS.dm)
+            .unknownSenderPolicy,
           created_at: new Date().toISOString(),
         });
       }
@@ -209,6 +223,7 @@ registerChannelAdapter('telegram', {
       concurrency: 'concurrent',
       extractReplyContext,
       supportsThreads: false,
+      defaults: TELEGRAM_DEFAULTS,
       transformOutboundText: sanitizeTelegramLegacyMarkdown,
       maxTextLength: 4000,
     });
@@ -242,4 +257,5 @@ registerChannelAdapter('telegram', {
     };
     return wrapped;
   },
+  defaults: TELEGRAM_DEFAULTS,
 });
