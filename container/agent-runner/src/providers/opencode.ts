@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
@@ -223,6 +224,10 @@ export class OpenCodeProvider implements AgentProvider {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
   }
+
+  // OpenCode re-reads its `instructions` file list fresh every session (see
+  // buildOpenCodeConfig above) instead of using a Claude-style settings hook.
+  registerMemorySessionHook(_hook: MemorySessionHookRegistration): void {}
 
   query(input: QueryInput): AgentQuery {
     if (input.continuation) {
