@@ -42,13 +42,25 @@ describe('mcpServersToOpenCodeConfig', () => {
     });
   });
 
-  it('omits environment when env is empty', () => {
+  it('preserves local defaults when args and env are omitted', () => {
     const mcp = mcpServersToOpenCodeConfig({
-      x: { command: 'true', args: [], env: {} },
+      x: { command: 'true' },
     });
     expect(mcp.x).toEqual({
       type: 'local',
       command: ['true'],
+      enabled: true,
+    });
+  });
+
+  it('maps Streamable HTTP servers to remote entries', () => {
+    expect(
+      mcpServersToOpenCodeConfig({
+        docs: { type: 'http', url: 'https://mcp.example.com/mcp' },
+      }).docs,
+    ).toEqual({
+      type: 'remote',
+      url: 'https://mcp.example.com/mcp',
       enabled: true,
     });
   });
