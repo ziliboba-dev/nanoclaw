@@ -36,6 +36,7 @@ import {
   openOutboundDbRw as openOutboundDbRwRaw,
   upsertSessionRouting,
   insertMessage,
+  updateMessageTrigger,
   migrateMessagesInTable,
 } from './db/session-db.js';
 import { log } from './log.js';
@@ -274,6 +275,22 @@ export function writeSessionMessage(
   }
 
   updateSession(sessionId, { last_active: new Date().toISOString() });
+}
+
+/**
+ * Flip a previously-written accumulate-only row (trigger=0) to wake-eligible
+ * (trigger=1). Used by the router's wake-coalescing window (src/router.ts) —
+ * see updateMessageTrigger in db/session-db.ts for why. No-ops if the
+ * session's inbound.db is gone (e.g. a `rm -rf` reset raced the flush).
+ */
+export function markMessageTriggered(agentGroupId: string, sessionId: string, messageId: string): void {
+  if (!fs.existsSync(inboundDbPath(agentGroupId, sessionId))) return;
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    updateMessageTrigger(db, messageId);
+  } finally {
+    db.close();
+  }
 }
 
 /**

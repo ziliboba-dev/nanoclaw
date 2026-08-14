@@ -133,6 +133,18 @@ export function insertMessage(
   });
 }
 
+/**
+ * Flip a row from accumulate-only (trigger=0) to wake-eligible (trigger=1).
+ * Used by the router's wake-coalescing window — see scheduleWakeCoalesced in
+ * src/router.ts. Every message written during the window lands with
+ * trigger=0; when the window closes, only the last one gets flipped, so the
+ * container's accumulate gate (poll-loop.ts) fires once with the whole
+ * burst already pending instead of once per message.
+ */
+export function updateMessageTrigger(db: Database.Database, id: string): void {
+  db.prepare(`UPDATE messages_in SET trigger = 1 WHERE id = ?`).run(id);
+}
+
 export function countDueMessages(db: Database.Database): number {
   return (
     db

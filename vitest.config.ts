@@ -7,5 +7,6 @@ export default defineConfig({
     // container/*.test.ts: top-level only — container/agent-runner tests run
     // under Bun (they depend on bun:sqlite) and must not be picked up here.
     include: ['src/**/*.test.ts', 'setup/**/*.test.ts', 'scripts/**/*.test.ts', 'container/*.test.ts'],
+    setupFiles: ['./vitest.setup.ts'],
   },
 });

@@ -30,7 +30,7 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { resolveSession, writeSessionMessage, writeOutboundDirect, markMessageTriggered } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -504,15 +504,24 @@ async function deliverToAgent(
     }
   }
 
+  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
+
+  // Always written accumulate-only (trigger=0) here — for the engaged branch,
+  // scheduleWakeCoalesced below flips the *last* message of a short burst to
+  // trigger=1 once the coalesce window closes. This is what lets two
+  // near-simultaneous inbound events (e.g. a Telegram forward + its
+  // accompanying text, delivered as two separate updates) land in the same
+  // agent prompt instead of one triggering a reply before the other's write
+  // has landed. See scheduleWakeCoalesced for the full rationale.
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
+    id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
     content: event.message.content,
-    trigger: wake ? 1 : 0,
+    trigger: 0,
   });
 
   log.info('Message routed', {
@@ -527,8 +536,9 @@ async function deliverToAgent(
   });
 
   if (wake) {
-    // Typing indicator + wake are only for the engaged branch; accumulated
-    // messages sit silently until a real trigger fires.
+    // Typing indicator fires immediately (per message) — only the wake
+    // itself is coalesced, so the UI stays responsive while the window
+    // gives near-simultaneous messages a chance to batch.
     // Typing fires via the adapter instance that owns this chat's row.
     startTypingRefresh(
       session.id,
@@ -538,14 +548,71 @@ async function deliverToAgent(
       effectiveThreadId,
       mg.instance,
     );
-    const freshSession = getSession(session.id);
-    if (freshSession) {
-      const woke = await wakeContainer(freshSession);
-      // wakeContainer never throws — it returns false on transient spawn
-      // failure (host-sweep retries). Stop the typing indicator we just
-      // started so it doesn't leak; the inbound row stays pending.
-      if (!woke) stopTypingRefresh(freshSession.id);
-    }
+    await scheduleWakeCoalesced(session.agent_group_id, session.id, messageId);
+  }
+}
+
+/**
+ * Delay before flipping the most recently written message of a session to
+ * trigger=1 and waking the container. Fixed-anchor window: starts on the
+ * first engaged message of a burst and always fires exactly this long after
+ * — later messages in the same window update which row gets flipped but
+ * don't push the deadline out (bounded latency, no risk of a chatty sender
+ * holding the agent silent indefinitely).
+ *
+ * Set to 0 to restore pre-coalescing behavior (every engaged message wakes
+ * immediately with trigger=1).
+ */
+const WAKE_COALESCE_MS = Number(process.env.NANOCLAW_WAKE_COALESCE_MS ?? 1000);
+
+interface WakeCoalesceState {
+  timer: ReturnType<typeof setTimeout>;
+  lastMessageId: string;
+  agentGroupId: string;
+}
+
+/**
+ * In-memory per-session coalescing state. Nothing here is durable: every
+ * message is already safely persisted (trigger=0) by writeSessionMessage
+ * before this map is ever touched, so a host restart mid-window only means
+ * the flip to trigger=1 is lost, not the message — it rides along as
+ * context the next time this session actually triggers (per the container
+ * poll loop's accumulate gate).
+ */
+const wakeCoalesce = new Map<string, WakeCoalesceState>();
+
+async function scheduleWakeCoalesced(agentGroupId: string, sessionId: string, messageId: string): Promise<void> {
+  if (WAKE_COALESCE_MS <= 0) {
+    // Coalescing disabled: behave exactly like the pre-coalescing code —
+    // wake synchronously, in the same await chain as the caller.
+    await flushWake(agentGroupId, sessionId, messageId);
+    return;
+  }
+  const existing = wakeCoalesce.get(sessionId);
+  if (existing) {
+    existing.lastMessageId = messageId;
+    return;
+  }
+  const timer = setTimeout(() => {
+    // Read the tracked state at fire time, not the messageId captured when
+    // this timer was created — later messages in the burst may have updated
+    // lastMessageId without resetting the timer (fixed-anchor window).
+    const state = wakeCoalesce.get(sessionId);
+    wakeCoalesce.delete(sessionId);
+    void flushWake(agentGroupId, sessionId, state?.lastMessageId ?? messageId);
+  }, WAKE_COALESCE_MS);
+  wakeCoalesce.set(sessionId, { timer, lastMessageId: messageId, agentGroupId });
+}
+
+async function flushWake(agentGroupId: string, sessionId: string, lastMessageId: string): Promise<void> {
+  markMessageTriggered(agentGroupId, sessionId, lastMessageId);
+  const freshSession = getSession(sessionId);
+  if (freshSession) {
+    const woke = await wakeContainer(freshSession);
+    // wakeContainer never throws — it returns false on transient spawn
+    // failure (host-sweep retries). Stop the typing indicator we started so
+    // it doesn't leak; the inbound row stays pending.
+    if (!woke) stopTypingRefresh(freshSession.id);
   }
 }
 
