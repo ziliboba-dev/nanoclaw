@@ -8,7 +8,14 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup, createMessagingGroupAgent } from './db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  createMessagingGroupAgent,
+} from './db/index.js';
 import { inboundDbPath } from './session-manager.js';
 import { findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
