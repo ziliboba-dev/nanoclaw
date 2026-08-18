@@ -53,6 +53,17 @@ describe('mcpServersToOpenCodeConfig', () => {
     });
   });
 
+  it('wraps a cwd-declaring server in the cd-then-exec argv', () => {
+    const mcp = mcpServersToOpenCodeConfig({
+      probe: { command: './run.js', args: ['--flag'], cwd: '/workspace/agent/plugin-data/sdr' },
+    });
+    expect(mcp.probe).toEqual({
+      type: 'local',
+      command: ['/bin/sh', '-c', 'cd "$0" && exec "$@"', '/workspace/agent/plugin-data/sdr', './run.js', '--flag'],
+      enabled: true,
+    });
+  });
+
   it('maps Streamable HTTP servers to remote entries', () => {
     expect(
       mcpServersToOpenCodeConfig({
@@ -61,6 +72,23 @@ describe('mcpServersToOpenCodeConfig', () => {
     ).toEqual({
       type: 'remote',
       url: 'https://mcp.example.com/mcp',
+      enabled: true,
+    });
+  });
+
+  it('passes remote headers through', () => {
+    expect(
+      mcpServersToOpenCodeConfig({
+        docs: {
+          type: 'http',
+          url: 'https://mcp.example.com/mcp',
+          headers: { 'X-Api-Version': '2024-06' },
+        },
+      }).docs,
+    ).toEqual({
+      type: 'remote',
+      url: 'https://mcp.example.com/mcp',
+      headers: { 'X-Api-Version': '2024-06' },
       enabled: true,
     });
   });
