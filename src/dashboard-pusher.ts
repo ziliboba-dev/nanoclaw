@@ -148,16 +148,24 @@ async function push(config: PusherConfig): Promise<void> {
 }
 
 async function collectSnapshot(): Promise<Record<string, unknown>> {
+  const [agentGroups, sessions, channels, users, tokens, contextWindows] = await Promise.all([
+    collectAgentGroups(),
+    collectSessions(),
+    collectChannels(),
+    collectUsers(),
+    collectTokens(),
+    collectContextWindows(),
+  ]);
   return {
     timestamp: new Date().toISOString(),
     assistant_name: ASSISTANT_NAME,
     uptime: Math.floor(process.uptime()),
-    agent_groups: await collectAgentGroups(),
-    sessions: await collectSessions(),
-    channels: await collectChannels(),
-    users: await collectUsers(),
-    tokens: await collectTokens(),
-    context_windows: await collectContextWindows(),
+    agent_groups: agentGroups,
+    sessions,
+    channels,
+    users,
+    tokens,
+    context_windows: contextWindows,
     activity: collectActivity(),
     messages: collectMessages(),
   };
@@ -165,61 +173,62 @@ async function collectSnapshot(): Promise<Record<string, unknown>> {
 
 async function collectAgentGroups() {
   const groups = await getAllAgentGroups();
-  const result = [];
-  for (const g of groups) {
-    const sessions = await getSessionsByAgentGroup(g.id);
-    const running = sessions.filter((s) => s.container_status === 'running' || s.container_status === 'idle');
-    const destinations = await getDestinations(g.id);
-    const membersRaw = await getMembers(g.id);
-    const members = [];
-    for (const m of membersRaw) {
-      const user = await getUser(m.user_id);
-      members.push({ ...m, display_name: user?.display_name ?? null });
-    }
-    const adminsRaw = await getAdminsOfAgentGroup(g.id);
-    const admins = [];
-    for (const a of adminsRaw) {
-      const user = await getUser(a.user_id);
-      admins.push({ ...a, display_name: user?.display_name ?? null });
-    }
+  return Promise.all(
+    groups.map(async (g) => {
+      const [sessions, destinations, rawMembers, rawAdmins, containerConfig, wirings] = await Promise.all([
+        getSessionsByAgentGroup(g.id),
+        getDestinations(g.id),
+        getMembers(g.id),
+        getAdminsOfAgentGroup(g.id),
+        getContainerConfig(g.id),
+        getDb().all<Record<string, unknown>>(
+          `SELECT mga.*, mg.channel_type, mg.platform_id, mg.name as mg_name, mg.is_group, mg.unknown_sender_policy
+         FROM messaging_group_agents mga
+         JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+         WHERE mga.agent_group_id = ?`,
+          g.id,
+        ),
+      ]);
+      const running = sessions.filter((s) => s.container_status === 'running' || s.container_status === 'idle');
+      const members = await Promise.all(
+        rawMembers.map(async (m) => {
+          const user = await getUser(m.user_id);
+          return { ...m, display_name: user?.display_name ?? null };
+        }),
+      );
+      const admins = await Promise.all(
+        rawAdmins.map(async (a) => {
+          const user = await getUser(a.user_id);
+          return { ...a, display_name: user?.display_name ?? null };
+        }),
+      );
 
-    // Wirings
-    const db = getDb();
-    const wirings = await db.all<Record<string, unknown>>(
-      `SELECT mga.*, mg.channel_type, mg.platform_id, mg.name as mg_name, mg.is_group, mg.unknown_sender_policy
-       FROM messaging_group_agents mga
-       JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
-       WHERE mga.agent_group_id = ?`,
-      g.id,
-    );
-
-    result.push({
-      id: g.id,
-      name: g.name,
-      folder: g.folder,
-      agent_provider: g.agent_provider,
-      container_config: (await getContainerConfig(g.id)) ?? null,
-      sessionCount: sessions.length,
-      runningSessions: running.length,
-      wirings,
-      destinations,
-      members,
-      admins,
-      created_at: g.created_at,
-    });
-  }
-  return result;
+      return {
+        id: g.id,
+        name: g.name,
+        folder: g.folder,
+        agent_provider: g.agent_provider,
+        container_config: containerConfig ?? null,
+        sessionCount: sessions.length,
+        runningSessions: running.length,
+        wirings,
+        destinations,
+        members,
+        admins,
+        created_at: g.created_at,
+      };
+    }),
+  );
 }
 
 async function collectSessions() {
-  const db = getDb();
-  return db.all<Record<string, unknown>>(
+  return getDb().all<Record<string, unknown>>(
     `SELECT s.*, ag.name as agent_group_name, ag.folder as agent_group_folder,
-            mg.channel_type, mg.platform_id, mg.name as messaging_group_name
-     FROM sessions s
-     LEFT JOIN agent_groups ag ON ag.id = s.agent_group_id
-     LEFT JOIN messaging_groups mg ON mg.id = s.messaging_group_id
-     ORDER BY s.last_active DESC NULLS LAST`,
+              mg.channel_type, mg.platform_id, mg.name as messaging_group_name
+       FROM sessions s
+       LEFT JOIN agent_groups ag ON ag.id = s.agent_group_id
+       LEFT JOIN messaging_groups mg ON mg.id = s.messaging_group_id
+       ORDER BY s.last_active DESC NULLS LAST`,
   );
 }
 
@@ -240,12 +249,13 @@ async function collectChannels() {
       };
     }
 
-    const agentsRaw = await getMessagingGroupAgents(mg.id);
-    const agents = [];
-    for (const a of agentsRaw) {
-      const group = await getAgentGroup(a.agent_group_id);
-      agents.push({ agent_group_id: a.agent_group_id, agent_group_name: group?.name ?? null, priority: a.priority });
-    }
+    const wiringAgents = await getMessagingGroupAgents(mg.id);
+    const agents = await Promise.all(
+      wiringAgents.map(async (a) => {
+        const group = await getAgentGroup(a.agent_group_id);
+        return { agent_group_id: a.agent_group_id, agent_group_name: group?.name ?? null, priority: a.priority };
+      }),
+    );
 
     byType[mg.channel_type].groups.push({
       messagingGroup: {
@@ -271,38 +281,38 @@ async function collectChannels() {
 
 async function collectUsers() {
   const users = await getAllUsers();
-  const result = [];
-  for (const u of users) {
-    const roles = await getUserRoles(u.id);
-    const dms = await getUserDmsForUser(u.id);
+  return Promise.all(
+    users.map(async (u) => {
+      const [roles, dms, memberships] = await Promise.all([
+        getUserRoles(u.id),
+        getUserDmsForUser(u.id),
+        getDb().all<Record<string, unknown>>(
+          `SELECT agm.agent_group_id, ag.name as agent_group_name
+         FROM agent_group_members agm
+         JOIN agent_groups ag ON ag.id = agm.agent_group_id
+         WHERE agm.user_id = ?`,
+          u.id,
+        ),
+      ]);
 
-    const db = getDb();
-    const memberships = await db.all<Record<string, unknown>>(
-      `SELECT agm.agent_group_id, ag.name as agent_group_name
-       FROM agent_group_members agm
-       JOIN agent_groups ag ON ag.id = agm.agent_group_id
-       WHERE agm.user_id = ?`,
-      u.id,
-    );
+      let privilege = 'none';
+      if (roles.some((r) => r.role === 'owner')) privilege = 'owner';
+      else if (roles.some((r) => r.role === 'admin' && !r.agent_group_id)) privilege = 'global_admin';
+      else if (roles.some((r) => r.role === 'admin')) privilege = 'admin';
+      else if (memberships.length > 0) privilege = 'member';
 
-    let privilege = 'none';
-    if (roles.some((r) => r.role === 'owner')) privilege = 'owner';
-    else if (roles.some((r) => r.role === 'admin' && !r.agent_group_id)) privilege = 'global_admin';
-    else if (roles.some((r) => r.role === 'admin')) privilege = 'admin';
-    else if (memberships.length > 0) privilege = 'member';
-
-    result.push({
-      id: u.id,
-      kind: u.kind,
-      display_name: u.display_name,
-      privilege,
-      roles,
-      memberships,
-      dmChannels: dms.map((d) => ({ channel_type: d.channel_type })),
-      created_at: u.created_at,
-    });
-  }
-  return result;
+      return {
+        id: u.id,
+        kind: u.kind,
+        display_name: u.display_name,
+        privilege,
+        roles,
+        memberships,
+        dmChannels: dms.map((d) => ({ channel_type: d.channel_type })),
+        created_at: u.created_at,
+      };
+    }),
+  );
 }
 
 async function collectTokens() {
@@ -504,12 +514,20 @@ async function collectContextWindows() {
   return results;
 }
 
+// "YYYY-MM-DDTHH" in the host's local time — the chart's hour labels are read
+// by a human, so bucket by local hour, not UTC. sv-SE renders "YYYY-MM-DD HH".
+function localHourKey(d: Date): string {
+  return d
+    .toLocaleString('sv-SE', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false })
+    .replace(' ', 'T');
+}
+
 function collectActivity() {
   const now = Date.now();
   const buckets: Record<string, { inbound: number; outbound: number }> = {};
 
   for (let i = 0; i < 24; i++) {
-    const key = new Date(now - i * 3600000).toISOString().slice(0, 13);
+    const key = localHourKey(new Date(now - i * 3600000));
     buckets[key] = { inbound: 0, outbound: 0 };
   }
 
@@ -535,7 +553,7 @@ function collectActivity() {
               timestamp: string;
             }[];
             for (const row of rows) {
-              const key = row.timestamp.slice(0, 13);
+              const key = localHourKey(new Date(row.timestamp));
               if (buckets[key]) buckets[key][direction]++;
             }
             db.close();
