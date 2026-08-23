@@ -78,22 +78,28 @@ async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
 }
 
 describe('add-dashboard integration point (startDashboard)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
-    const db = initTestDb();
-    runMigrations(db);
+    const db = await initTestDb();
+    await runMigrations(db);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     stopDashboardPusher();
-    closeDb();
+    await closeDb();
     delete process.env.DASHBOARD_SECRET;
     delete process.env.DASHBOARD_PORT;
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 
   it('posts a snapshot of the seeded state when DASHBOARD_SECRET is set', async () => {
-    createAgentGroup({ id: 'ag-1', name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
+    await createAgentGroup({
+      id: 'ag-1',
+      name: 'Test Agent',
+      folder: 'test-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
 
     const dash = await startFakeDashboard();
     process.env.DASHBOARD_SECRET = 'test-secret';

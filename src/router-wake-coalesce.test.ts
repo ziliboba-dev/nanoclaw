@@ -16,7 +16,7 @@ import {
   createMessagingGroup,
   createMessagingGroupAgent,
 } from './db/index.js';
-import { inboundDbPath } from './session-manager.js';
+import { inboundDbPath } from './mailbox/sqlite/paths.js';
 import { findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 
@@ -43,15 +43,21 @@ function now() {
 
 const TEST_DIR = '/tmp/nanoclaw-test-wake-coalesce';
 
-beforeEach(() => {
+beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
 
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
-  createAgentGroup({ id: 'ag-1', name: 'Test Agent', folder: 'test-agent', agent_provider: null, created_at: now() });
-  createMessagingGroup({
+  await createAgentGroup({
+    id: 'ag-1',
+    name: 'Test Agent',
+    folder: 'test-agent',
+    agent_provider: null,
+    created_at: now(),
+  });
+  await createMessagingGroup({
     id: 'mg-1',
     channel_type: 'discord',
     platform_id: 'chan-123',
@@ -60,7 +66,7 @@ beforeEach(() => {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  createMessagingGroupAgent({
+  await createMessagingGroupAgent({
     id: 'mga-1',
     messaging_group_id: 'mg-1',
     agent_group_id: 'ag-1',
@@ -77,9 +83,9 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
-  closeDb();
+  await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -104,7 +110,7 @@ describe('router wake coalescing', () => {
     // Still inside the coalesce window — nothing should have woken yet.
     expect(wakeContainer).not.toHaveBeenCalled();
 
-    const session = findSession('mg-1', null);
+    const session = await findSession('mg-1', null);
     expect(session).toBeDefined();
 
     let rows = new Database(inboundDbPath('ag-1', session!.id))
